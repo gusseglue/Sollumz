@@ -1,12 +1,15 @@
 """Vehicle LOD Generator for Sollumz.
 
 Automatically generates multiple LOD levels for vehicle fragments (YFT) with
-intelligent, component-aware decimation. Builds on the existing Sollumz LOD system
-and Blender's decimate modifier.
+intelligent, component-aware decimation.  Uses a custom bmesh-based edge-collapse
+algorithm instead of Blender's built-in Decimate modifier for better control over
+non-merged / disconnected geometry common in vehicle models.
 """
+import bmesh
 import bpy
-from bpy.types import Context, Object, Operator, Panel, PropertyGroup
+from bpy.types import Context, Mesh, Object, Operator, Panel, PropertyGroup
 from bpy.props import IntProperty
+import heapq
 
 from ..lods import LODLevels
 from ..sollumz_properties import LODLevel, SollumType, SOLLUMZ_UI_NAMES
@@ -15,7 +18,7 @@ from ..tools.blenderhelper import get_children_recursive
 
 
 # ---------------------------------------------------------------------------
-#  Helpers
+#  Helpers – mesh classification
 # ---------------------------------------------------------------------------
 
 # Keywords used to classify vehicle sub-meshes by name.
@@ -76,36 +79,28 @@ def _classify_mesh(obj: Object) -> str:
     return "body"
 
 
-# Per-category decimation ratio *multipliers* applied on top of the base ratio
-# for each LOD level.  The value is multiplied with the base decimation ratio
-# to get the final fraction of geometry to remove.  Lower values mean the
-# category is more *protective* (less geometry removed); higher values mean
-# more aggressive reduction.
+# ---------------------------------------------------------------------------
+#  Helpers – decimation parameters
+# ---------------------------------------------------------------------------
+
+# Per-category decimation ratio *multipliers*.  Lower values are more
+# *protective* (less geometry removed); higher values are more aggressive.
 #
-# Vehicle meshes are often *not* merged — vertices at shared edges between parts
-# don't coincide.  Aggressive decimation on such geometry can collapse edges
-# across gaps and create holes.  Categories with typically non-merged geometry
+# Vehicle meshes are often *not* merged — vertices at shared edges between
+# parts don't coincide.  Categories with typically non-merged geometry
 # (wheels, body shell) use lower multipliers to preserve their shape.
 _CATEGORY_AGGRESSION: dict[str, float] = {
-    "wheel":     0.4,   # very protective — wheels have many disconnected parts
-    "body":      0.7,   # protective — body shells often have non-merged vertices
-    "glass":     0.8,   # moderate — flat panels but visible
-    "light":     0.9,   # slightly protective
-    "detail":    1.3,   # moderate reduction
-    "underbody": 1.5,   # aggressive — rarely visible
+    "wheel":     0.4,
+    "body":      0.7,
+    "glass":     0.8,
+    "light":     0.9,
+    "detail":    1.3,
+    "underbody": 1.5,
 }
 
-# Maximum fraction of geometry to remove in a single decimation pass.
-# Capped below 1.0 to avoid producing degenerate meshes.
 _MAX_DECIMATION_RATIO = 0.99
-
-# Minimum fraction of geometry to keep after decimation, ensuring the mesh
-# is never fully collapsed.  Set conservatively to avoid destroying non-merged
-# geometry (disconnected islands can vanish at very low keep ratios).
 _MIN_KEEP_RATIO = 0.05
 
-# Default target polygon counts per LOD level (informational, used to compute
-# an appropriate decimation ratio when the user enables adaptive mode).
 _DEFAULT_TARGETS: dict[LODLevel, int] = {
     LODLevel.VERYHIGH: 200_000,
     LODLevel.HIGH:     175_000,
@@ -114,6 +109,25 @@ _DEFAULT_TARGETS: dict[LODLevel, int] = {
     LODLevel.VERYLOW:  7_500,
 }
 
+
+def _compute_base_ratio_for_lod(current_polys: int, target_polys: int) -> float:
+    """Fraction of geometry to *remove* to reach *target_polys* from *current_polys*."""
+    if current_polys <= 0 or current_polys <= target_polys:
+        return 0.0
+    ratio = 1.0 - (target_polys / current_polys)
+    return max(0.0, min(ratio, _MAX_DECIMATION_RATIO))
+
+
+def _keep_ratio_for_mesh(base_ratio: float, category: str) -> float:
+    """Fraction of geometry to *keep* after applying category aggression."""
+    aggression = _CATEGORY_AGGRESSION.get(category, 1.0)
+    remove = base_ratio * aggression
+    return max(_MIN_KEEP_RATIO, min(1.0 - remove, 1.0))
+
+
+# ---------------------------------------------------------------------------
+#  Helpers – model object queries
+# ---------------------------------------------------------------------------
 
 def _get_total_poly_count(fragment_obj: Object) -> int:
     """Return total polygon count across all DRAWABLE_MODEL children."""
@@ -137,34 +151,142 @@ def _get_model_objects(fragment_obj: Object) -> list[Object]:
     return models
 
 
-def _compute_base_ratio_for_lod(
-    current_polys: int,
-    target_polys: int,
-) -> float:
-    """Compute a base decimation ratio to reach *target_polys* from *current_polys*.
+def _find_original_mesh(model_obj: Object) -> Mesh | None:
+    """Return the highest-quality mesh available for *model_obj*.
 
-    Returns a value in [0.0, 1.0] where 0.0 means keep everything and
-    1.0 means remove everything.
+    Checks LOD levels from highest to lowest and returns the first mesh
+    found.  This is the mesh that will be used as the source for all
+    generated LOD levels.
     """
-    if current_polys <= 0 or current_polys <= target_polys:
-        return 0.0
-    ratio = 1.0 - (target_polys / current_polys)
-    return max(0.0, min(ratio, _MAX_DECIMATION_RATIO))
+    lods: LODLevels = model_obj.sz_lods
+    for lod_level in LODLevel:
+        lod = lods.get_lod(lod_level)
+        m = lod.mesh
+        if m is not None:
+            return m
+    # Fallback: the object's current data block
+    if model_obj.type == "MESH":
+        return model_obj.data
+    return None
 
 
-def _decimate_ratio_for_mesh(
-    base_ratio: float,
-    category: str,
-) -> float:
-    """Return the *keep* ratio (passed to the decimate modifier) for a mesh.
+# ---------------------------------------------------------------------------
+#  Custom bmesh edge-collapse decimation
+# ---------------------------------------------------------------------------
 
-    ``base_ratio`` is the fraction to *remove* (0 = keep all, 1 = remove all).
-    The function applies the category aggression multiplier and clamps the result.
+# Large penalty added to boundary/non-manifold edge costs to ensure they are
+# collapsed last, preserving mesh island outlines and UV seams.
+_EDGE_PROTECT_PENALTY = 1e6
+
+# Maximum edge length (in Blender units) that will be considered for collapse.
+# Edges longer than this threshold are skipped to avoid collapsing across gaps
+# in non-merged geometry.  Vehicle models typically use a scale where 1 unit ≈
+# 1 metre, so 0.5 represents ~50 cm — well above typical edge lengths in
+# detailed geometry but below the gaps between disconnected parts.
+_MAX_COLLAPSE_EDGE_LENGTH = 0.5
+
+
+def _edge_collapse_cost(edge: bmesh.types.BMEdge) -> float:
+    """Score an edge for collapse priority (lower = collapse first).
+
+    Uses edge length as the primary metric — shorter edges are collapsed
+    first because they contribute least to the overall silhouette.
+    Boundary edges (edges with only one face) get a large penalty so they
+    are preserved longer, protecting mesh island outlines and UV seams.
     """
-    aggression = _CATEGORY_AGGRESSION.get(category, 1.0)
-    remove = base_ratio * aggression
-    keep = max(_MIN_KEEP_RATIO, min(1.0 - remove, 1.0))
-    return keep
+    length = edge.calc_length()
+
+    if edge.is_boundary:
+        length += _EDGE_PROTECT_PENALTY
+
+    if not edge.is_manifold and not edge.is_boundary:
+        length += _EDGE_PROTECT_PENALTY
+
+    return length
+
+
+def _bmesh_edge_collapse_decimate(bm: bmesh.types.BMesh, keep_ratio: float) -> None:
+    """Decimate a bmesh by collapsing shortest edges first.
+
+    Operates in-place on *bm*.  Preserves boundary edges and non-manifold
+    geometry to protect disconnected mesh islands (non-merged vertices).
+
+    Args:
+        bm: The bmesh to decimate.
+        keep_ratio: Fraction of faces to keep (0.0–1.0).
+    """
+    target_faces = max(4, int(len(bm.faces) * keep_ratio))
+
+    if len(bm.faces) <= target_faces:
+        return
+
+    # Build a min-heap of (cost, edge_index) pairs
+    bm.edges.ensure_lookup_table()
+    heap: list[tuple[float, int]] = []
+    for edge in bm.edges:
+        cost = _edge_collapse_cost(edge)
+        heapq.heappush(heap, (cost, edge.index))
+
+    collapsed = 0
+    max_collapses = len(bm.faces) - target_faces
+
+    while heap and collapsed < max_collapses and len(bm.faces) > target_faces:
+        cost, edge_idx = heapq.heappop(heap)
+
+        # Edge may have been removed by a previous collapse
+        bm.edges.ensure_lookup_table()
+        if edge_idx >= len(bm.edges):
+            continue
+        edge = bm.edges[edge_idx]
+        if not edge.is_valid:
+            continue
+
+        # Skip boundary and non-manifold edges
+        if edge.is_boundary or (not edge.is_manifold):
+            continue
+
+        # Skip edges longer than the threshold to avoid collapsing across
+        # gaps in non-merged geometry
+        if edge.calc_length() > _MAX_COLLAPSE_EDGE_LENGTH:
+            continue
+
+        # Collapse: merge v2 into v1 (avoids extra Vector allocation)
+        v1, v2 = edge.verts
+        midpoint = (v1.co + v2.co) / 2.0
+
+        try:
+            new_vert = bmesh.utils.edge_collapse(edge, v1)
+            new_vert.co = midpoint
+            collapsed += 1
+        except (RuntimeError, ValueError):
+            # edge_collapse raises RuntimeError when the collapse would
+            # create degenerate geometry.  Skip and continue.
+            continue
+
+        # Re-score neighbouring edges
+        for neighbour_edge in new_vert.link_edges:
+            if neighbour_edge.is_valid:
+                new_cost = _edge_collapse_cost(neighbour_edge)
+                heapq.heappush(heap, (new_cost, neighbour_edge.index))
+
+
+def _decimate_mesh_bmesh(src_mesh: Mesh, keep_ratio: float) -> Mesh:
+    """Create a decimated copy of *src_mesh* using custom bmesh edge-collapse.
+
+    Returns a new Mesh data-block.  The original is not modified.
+    """
+    new_mesh = src_mesh.copy()
+
+    bm = bmesh.new()
+    bm.from_mesh(new_mesh)
+
+    _bmesh_edge_collapse_decimate(bm, keep_ratio)
+
+    bm.to_mesh(new_mesh)
+    bm.free()
+
+    new_mesh.update()
+    return new_mesh
 
 
 # ---------------------------------------------------------------------------
@@ -207,31 +329,42 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
             (LODLevel.VERYLOW, props.target_verylow),
         ]
 
-        total_before = _get_total_poly_count(frag_obj)
+        # Find the original mesh for each model (highest quality available)
+        original_meshes: dict[str, Mesh] = {}
+        original_total = 0
+        for model_obj in models:
+            src = _find_original_mesh(model_obj)
+            if src is not None:
+                original_meshes[model_obj.name] = src
+                original_total += len(src.polygons)
+
+        if original_total == 0:
+            self.report({"WARNING"}, "No mesh data found in any drawable model")
+            return {"CANCELLED"}
+
         generated_count = 0
 
         for lod_level, target in lod_levels:
-            # Compute base decimation ratio from total current polys
-            base_ratio = _compute_base_ratio_for_lod(total_before, target)
-            if base_ratio <= 0.0:
-                # Current poly count is already below target, copy mesh as-is
-                for model_obj in models:
-                    self._copy_active_lod(model_obj, lod_level)
-                generated_count += 1
-                continue
+            base_ratio = _compute_base_ratio_for_lod(original_total, target)
 
             for model_obj in models:
-                self._generate_lod_for_model(
-                    context, model_obj, lod_level, base_ratio,
-                )
+                src_mesh = original_meshes.get(model_obj.name)
+                if src_mesh is None:
+                    continue
+
+                if base_ratio <= 0.0:
+                    # Target is above current poly count — copy original as-is
+                    self._set_lod_mesh(model_obj, lod_level, src_mesh.copy())
+                else:
+                    category = _classify_mesh(model_obj)
+                    keep_ratio = _keep_ratio_for_mesh(base_ratio, category)
+                    decimated = _decimate_mesh_bmesh(src_mesh, keep_ratio)
+                    decimated.name = f"{model_obj.name}.{SOLLUMZ_UI_NAMES[lod_level].lower()}"
+                    self._set_lod_mesh(model_obj, lod_level, decimated)
 
             generated_count += 1
 
-        # Restore all models to their original LOD level
-        for model_obj in models:
-            if model_obj.mode != "OBJECT":
-                bpy.ops.object.mode_set(mode="OBJECT")
-
+        # Build report
         total_after: dict[str, int] = {}
         for lod_level, _ in lod_levels:
             count = 0
@@ -243,7 +376,7 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
             total_after[SOLLUMZ_UI_NAMES[lod_level]] = count
 
         report_lines = [f"Generated {generated_count} LOD level(s) for '{frag_obj.name}'"]
-        report_lines.append(f"  Original: {total_before:,} polys")
+        report_lines.append(f"  Original: {original_total:,} polys")
         for name, count in total_after.items():
             report_lines.append(f"  {name}: {count:,} polys")
         self.report({"INFO"}, " | ".join(report_lines))
@@ -253,70 +386,12 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
     # -- internal helpers --------------------------------------------------
 
     @staticmethod
-    def _copy_active_lod(model_obj: Object, lod_level: LODLevel) -> None:
-        """Copy the currently active LOD mesh into *lod_level*."""
-        lods: LODLevels = model_obj.sz_lods
-        src_mesh = lods.active_lod.mesh
-        if src_mesh is None:
-            return
-        lod = lods.get_lod(lod_level)
-        if lod.mesh is not None:
-            return  # already has a mesh
-        lod.mesh = src_mesh.copy()
-
-    @staticmethod
-    def _generate_lod_for_model(
-        context: Context,
-        model_obj: Object,
-        lod_level: LODLevel,
-        base_ratio: float,
-    ) -> None:
-        """Generate a single LOD mesh for *model_obj* via Decimate modifier.
-
-        Uses the Decimate modifier (COLLAPSE mode) instead of the edit-mode
-        decimate operator because it handles non-merged geometry (disconnected
-        mesh islands / unwelded vertices) much better — it respects island
-        boundaries and avoids collapsing edges across gaps.
-        """
+    def _set_lod_mesh(model_obj: Object, lod_level: LODLevel, mesh: Mesh) -> None:
+        """Set the mesh for *lod_level*, replacing any existing mesh."""
         lods: LODLevels = model_obj.sz_lods
         lod = lods.get_lod(lod_level)
-
-        if lod.mesh is not None:
-            return  # already has a mesh, don't overwrite
-
-        src_mesh = lods.active_lod.mesh
-        if src_mesh is None:
-            return
-
-        category = _classify_mesh(model_obj)
-        keep_ratio = _decimate_ratio_for_mesh(base_ratio, category)
-
-        new_mesh = src_mesh.copy()
-        new_mesh.name = f"{model_obj.name}.{SOLLUMZ_UI_NAMES[lod_level].lower()}"
-
-        # Store the mesh in the LOD slot and switch to it
-        lod.mesh = new_mesh
-
-        prev_lod_level = lods.active_lod_level
-        prev_active = context.view_layer.objects.active
-
-        context.view_layer.objects.active = model_obj
-        if model_obj.mode != "OBJECT":
-            bpy.ops.object.mode_set(mode="OBJECT")
-        lods.active_lod_level = lod_level
-
-        # Apply a Decimate modifier (COLLAPSE mode).
-        # The modifier respects disconnected mesh islands and avoids
-        # collapsing edges between non-merged vertices, which is critical
-        # for vehicle models where parts (wheels, body panels) are often
-        # separate, unwelded geometry within the same mesh object.
-        mod = model_obj.modifiers.new(name="_sz_lod_decimate", type="DECIMATE")
-        mod.decimate_type = "COLLAPSE"
-        mod.ratio = keep_ratio
-        bpy.ops.object.modifier_apply(modifier=mod.name)
-
-        lods.active_lod_level = prev_lod_level
-        context.view_layer.objects.active = prev_active
+        # Always overwrite — the user asked to (re)generate
+        lod.mesh = mesh
 
 
 class SOLLUMZ_OT_vehicle_batch_generate_lods(Operator):
