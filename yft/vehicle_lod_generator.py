@@ -100,10 +100,11 @@ _MIN_KEEP_RATIO = 0.01
 # Default target polygon counts per LOD level (informational, used to compute
 # an appropriate decimation ratio when the user enables adaptive mode).
 _DEFAULT_TARGETS: dict[LODLevel, int] = {
-    LODLevel.HIGH:    200_000,
-    LODLevel.MEDIUM:  90_000,
-    LODLevel.LOW:     40_000,
-    LODLevel.VERYLOW: 7_500,
+    LODLevel.VERYHIGH: 200_000,
+    LODLevel.HIGH:     175_000,
+    LODLevel.MEDIUM:   90_000,
+    LODLevel.LOW:      40_000,
+    LODLevel.VERYLOW:  7_500,
 }
 
 
@@ -192,6 +193,7 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
             return {"CANCELLED"}
 
         lod_levels = [
+            (LODLevel.VERYHIGH, props.target_veryhigh),
             (LODLevel.HIGH, props.target_high),
             (LODLevel.MEDIUM, props.target_medium),
             (LODLevel.LOW, props.target_low),
@@ -340,10 +342,17 @@ class SOLLUMZ_OT_vehicle_batch_generate_lods(Operator):
 class SzVehicleLodProperties(PropertyGroup):
     """Configuration properties for vehicle LOD generation."""
 
+    target_veryhigh: IntProperty(
+        name="Very High LOD Target",
+        description="Target polygon count for Very High LOD. Typically the closest/highest detail level",
+        default=200_000,
+        min=1_000,
+        max=2_000_000,
+    )
     target_high: IntProperty(
         name="High LOD Target",
         description="Target polygon count for High LOD (LOD 0). Typically used at close range",
-        default=200_000,
+        default=175_000,
         min=1_000,
         max=2_000_000,
     )
@@ -395,6 +404,7 @@ class SOLLUMZ_PT_VEHICLE_LOD_GENERATOR_PANEL(Panel):
         props = context.scene.sz_vehicle_lod_props
 
         col = layout.column(align=True)
+        col.prop(props, "target_veryhigh")
         col.prop(props, "target_high")
         col.prop(props, "target_medium")
         col.prop(props, "target_low")
