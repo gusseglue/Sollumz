@@ -67,6 +67,11 @@ def main(argv: list[str]) -> int:
         help="Do not use symmetrical decimation (default: use symmetry)",
     )
     parser.add_argument(
+        "--no-triangulate",
+        action="store_true",
+        help="Do not keep triangulated faces from decimation (default: triangulate)",
+    )
+    parser.add_argument(
         "--report",
         type=Path,
         help="Output file for optimization report",
@@ -101,6 +106,7 @@ def main(argv: list[str]) -> int:
             report_lines.append("-" * 80)
 
             # Clear scene and import YFT
+            # Note: read_homefile clears all unsaved changes - safe for batch processing
             bpy.ops.wm.read_homefile()
             bpy.ops.sollumz.import_assets(
                 directory=str(file_path.parent.absolute()),
@@ -135,6 +141,7 @@ def main(argv: list[str]) -> int:
                 not args.no_preserve_uvs,
                 not args.no_preserve_vertex_colors,
                 not args.no_symmetry,
+                not args.no_triangulate,
                 report_lines
             )
 
@@ -194,7 +201,7 @@ def main(argv: list[str]) -> int:
 
 
 def optimize_yft(frag_obj, lod_high, lod_medium, lod_low, lod_verylow,
-                 preserve_uvs, preserve_vertex_colors, use_symmetry, report_lines):
+                 preserve_uvs, preserve_vertex_colors, use_symmetry, use_triangulate, report_lines):
     """Optimize a single YFT fragment by generating LOD levels."""
     import bpy
     from ..sollumz_properties import SollumType, LODLevel
@@ -238,6 +245,7 @@ def optimize_yft(frag_obj, lod_high, lod_medium, lod_low, lod_verylow,
             preserve_uvs,
             preserve_vertex_colors,
             use_symmetry,
+            use_triangulate,
             report_lines
         )
         if result:
@@ -257,7 +265,7 @@ def optimize_yft(frag_obj, lod_high, lod_medium, lod_low, lod_verylow,
 
 
 def optimize_model_lods(model_obj, lod_high, lod_medium, lod_low, lod_verylow,
-                        preserve_uvs, preserve_vertex_colors, use_symmetry, report_lines):
+                        preserve_uvs, preserve_vertex_colors, use_symmetry, use_triangulate, report_lines):
     """Optimize a single drawable model by generating LOD levels."""
     import bpy
     from ..sollumz_properties import LODLevel
@@ -325,7 +333,7 @@ def optimize_model_lods(model_obj, lod_high, lod_medium, lod_low, lod_verylow,
             # Add decimate modifier
             decimate_mod = model_obj.modifiers.new(name="TempDecimate", type="DECIMATE")
             decimate_mod.ratio = ratio
-            decimate_mod.use_collapse_triangulate = True
+            decimate_mod.use_collapse_triangulate = use_triangulate
 
             if use_symmetry:
                 decimate_mod.use_symmetry = True

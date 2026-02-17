@@ -158,11 +158,11 @@ The tool uses Blender's built-in Decimate modifier with the "Collapse" method:
 ### LOD Level Mapping
 
 Sollumz LOD levels map to GTA V as follows:
-- **LOD Level::VERYHIGH** → Not used in optimization (preserved if exists)
-- **LOD Level::HIGH** → LOD_0 (High detail)
-- **LOD Level::MEDIUM** → LOD_1 (Medium detail)
-- **LOD Level::LOW** → LOD_2 (Low detail)
-- **LOD Level::VERYLOW** → LOD_3 (Very low detail)
+- **LODLevel.VERYHIGH** → Not used in optimization (preserved if exists)
+- **LODLevel.HIGH** → LOD_0 (High detail)
+- **LODLevel.MEDIUM** → LOD_1 (Medium detail)
+- **LODLevel.LOW** → LOD_2 (Low detail)
+- **LODLevel.VERYLOW** → LOD_3 (Very low detail)
 
 ### Export Format
 

@@ -6,12 +6,29 @@ from math import radians
 from mathutils import Matrix, Vector
 from itertools import chain
 
-from szio.gta5 import AssetFormat, AssetVersion, AssetTarget, FragVehicleWindow
+from szio.gta5 import (
+    AssetFormat,
+    AssetVersion,
+    AssetTarget,
+    FragVehicleWindow,
+)
 from ..tools.meshhelper import get_combined_bound_box
 from ..shared.geometry import get_mass_properties_of_box
 from ..sollumz_helper import find_sollumz_parent
-from ..sollumz_properties import BOUND_POLYGON_TYPES, BOUND_TYPES, MaterialType, SollumType, VehicleLightID, LODLevel
-from ..tools.blenderhelper import add_child_of_bone_constraint, create_blender_object, create_empty_object, get_child_of_bone
+from ..sollumz_properties import (
+    BOUND_POLYGON_TYPES,
+    BOUND_TYPES,
+    MaterialType,
+    SollumType,
+    VehicleLightID,
+    LODLevel,
+)
+from ..tools.blenderhelper import (
+    add_child_of_bone_constraint,
+    create_blender_object,
+    create_empty_object,
+    get_child_of_bone,
+)
 from ..ybn.collision_materials import collisionmats
 from ..dependencies import IS_SZIO_NATIVE_AVAILABLE
 
@@ -862,8 +879,9 @@ class SOLLUMZ_OT_auto_optimize_yft_lods(bpy.types.Operator):
 
                 # Apply the modifier with error handling
                 try:
-                    with context.temp_override(object=model_obj):
-                        bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
+                    # Set active object for modifier application
+                    bpy.context.view_layer.objects.active = model_obj
+                    bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
                 except Exception as e:
                     # Clean up modifier if application fails
                     if decimate_mod.name in model_obj.modifiers:
