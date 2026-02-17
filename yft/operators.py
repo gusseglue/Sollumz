@@ -689,10 +689,10 @@ class SOLLUMZ_OT_auto_optimize_yft_lods(bpy.types.Operator):
         default=True
     )
 
-    batch_mode: bpy.props.BoolProperty(
-        name="Batch Mode",
-        description="Process multiple YFT files",
-        default=False
+    use_collapse_triangulate: bpy.props.BoolProperty(
+        name="Triangulate",
+        description="Keep triangulated faces resulting from decimation",
+        default=True
     )
 
     @classmethod
@@ -720,6 +720,7 @@ class SOLLUMZ_OT_auto_optimize_yft_lods(bpy.types.Operator):
         box.prop(self, "preserve_uvs")
         box.prop(self, "preserve_vertex_colors")
         box.prop(self, "use_symmetry")
+        box.prop(self, "use_collapse_triangulate")
 
     def execute(self, context):
         obj = context.active_object
@@ -778,8 +779,10 @@ class SOLLUMZ_OT_auto_optimize_yft_lods(bpy.types.Operator):
         report_lines.append(f"LOD Very Low total: {total_optimized_polys['verylow']:,}")
 
         # Print report to console
+        print("\n" + "=" * 80)
         for line in report_lines:
             print(line)
+        print("=" * 80 + "\n")
 
         self.report({"INFO"}, f"LOD optimization complete! Processed {len(model_objs)} models.")
 
@@ -847,22 +850,19 @@ class SOLLUMZ_OT_auto_optimize_yft_lods(bpy.types.Operator):
 
             # Apply decimation
             if ratio < 1.0:
-                bpy.ops.object.mode_set(mode="EDIT")
-                bpy.ops.mesh.select_all(action="SELECT")
-
-                # Use decimate modifier approach
                 bpy.ops.object.mode_set(mode="OBJECT")
 
                 # Add decimate modifier
                 decimate_mod = model_obj.modifiers.new(name="TempDecimate", type="DECIMATE")
                 decimate_mod.ratio = ratio
-                decimate_mod.use_collapse_triangulate = True
+                decimate_mod.use_collapse_triangulate = self.use_collapse_triangulate
 
                 if self.use_symmetry:
                     decimate_mod.use_symmetry = True
 
                 # Apply the modifier
-                bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
+                with context.temp_override(object=model_obj):
+                    bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
 
             final_poly_count = len(new_mesh.polygons)
             result[lod_name] = final_poly_count
