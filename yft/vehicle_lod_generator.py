@@ -89,6 +89,14 @@ _CATEGORY_AGGRESSION: dict[str, float] = {
     "underbody": 1.5,
 }
 
+# Maximum fraction of geometry to remove in a single decimation pass.
+# Capped below 1.0 to avoid producing degenerate meshes.
+_MAX_DECIMATION_RATIO = 0.99
+
+# Minimum fraction of geometry to keep after decimation, ensuring the mesh
+# is never fully collapsed.
+_MIN_KEEP_RATIO = 0.01
+
 # Default target polygon counts per LOD level (informational, used to compute
 # an appropriate decimation ratio when the user enables adaptive mode).
 _DEFAULT_TARGETS: dict[LODLevel, int] = {
@@ -133,7 +141,7 @@ def _compute_base_ratio_for_lod(
     if current_polys <= 0 or current_polys <= target_polys:
         return 0.0
     ratio = 1.0 - (target_polys / current_polys)
-    return max(0.0, min(ratio, 0.99))
+    return max(0.0, min(ratio, _MAX_DECIMATION_RATIO))
 
 
 def _decimate_ratio_for_mesh(
@@ -147,7 +155,7 @@ def _decimate_ratio_for_mesh(
     """
     aggression = _CATEGORY_AGGRESSION.get(category, 1.0)
     remove = base_ratio * aggression
-    keep = max(0.01, min(1.0 - remove, 1.0))
+    keep = max(_MIN_KEEP_RATIO, min(1.0 - remove, 1.0))
     return keep
 
 
@@ -334,28 +342,28 @@ class SzVehicleLodProperties(PropertyGroup):
 
     target_high: IntProperty(
         name="High LOD Target",
-        description="Target polygon count for High LOD (LOD 0). Used when the player is close (0-20m)",
+        description="Target polygon count for High LOD (LOD 0). Typically used at close range",
         default=200_000,
         min=1_000,
         max=2_000_000,
     )
     target_medium: IntProperty(
         name="Medium LOD Target",
-        description="Target polygon count for Medium LOD (LOD 1). Used at 20-50m distance",
+        description="Target polygon count for Medium LOD (LOD 1). Typically used at medium range",
         default=90_000,
         min=500,
         max=1_000_000,
     )
     target_low: IntProperty(
         name="Low LOD Target",
-        description="Target polygon count for Low LOD (LOD 2). Used at 50-150m distance",
+        description="Target polygon count for Low LOD (LOD 2). Typically used at far range",
         default=40_000,
         min=100,
         max=500_000,
     )
     target_verylow: IntProperty(
         name="Very Low LOD Target",
-        description="Target polygon count for Very Low LOD (LOD 3). Used at 150m+ distance",
+        description="Target polygon count for Very Low LOD (LOD 3). Typically used at very far range",
         default=7_500,
         min=50,
         max=100_000,
