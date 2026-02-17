@@ -209,10 +209,9 @@ def _decimate_mesh(src_mesh: Mesh, keep_ratio: float) -> Mesh:
         temp_obj.select_set(True)
 
         # --- 1. Merge by distance (weld duplicated verts) ----------------
-        bpy.ops.object.mode_set(mode="EDIT")
-        bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.mesh.merge_by_distance(threshold=0.0001)
-        bpy.ops.object.mode_set(mode="OBJECT")
+        mod_weld = temp_obj.modifiers.new(name="_weld", type="WELD")
+        mod_weld.merge_threshold = 0.0001
+        bpy.ops.object.modifier_apply(modifier=mod_weld.name)
 
         # --- 2. Decimate -------------------------------------------------
         mod_dec = temp_obj.modifiers.new(name="_decimate", type="DECIMATE")
@@ -228,12 +227,6 @@ def _decimate_mesh(src_mesh: Mesh, keep_ratio: float) -> Mesh:
 
         result_mesh = temp_obj.data
     finally:
-        # Ensure we're back in object mode before cleanup
-        try:
-            if temp_obj.mode != "OBJECT":
-                bpy.ops.object.mode_set(mode="OBJECT")
-        except RuntimeError:
-            pass
         bpy.data.objects.remove(temp_obj, do_unlink=True)
 
     return result_mesh
