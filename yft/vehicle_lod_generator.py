@@ -304,6 +304,10 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
                         self._set_lod_mesh(model_obj, lod_level, src_mesh.copy())
                     else:
                         category = _classify_mesh(model_obj)
+                        if category == "glass":
+                            # Glass must never be decimated — it creates holes
+                            self._set_lod_mesh(model_obj, lod_level, src_mesh.copy())
+                            continue
                         keep_ratio = _keep_ratio_for_mesh(base_ratio, category)
                         decimated = _decimate_mesh(src_mesh, keep_ratio)
                         decimated.name = f"{model_obj.name}.{SOLLUMZ_UI_NAMES[lod_level].lower()}"
