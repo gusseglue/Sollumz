@@ -57,7 +57,7 @@ def _classify_mesh(obj: Object) -> str:
     """Return a classification string for *obj* based on its name.
 
     Categories:
-        ``"interior"``  – interior parts (never decimated)
+        ``"interior"``  – interior parts (very careful reduction)
         ``"underbody"`` – parts under the car (aggressive reduction)
         ``"detail"``    – small detail parts (moderate reduction)
         ``"glass"``     – windows / glass (preserve shape, reduce moderately)
@@ -100,7 +100,7 @@ def _classify_mesh(obj: Object) -> str:
 # parts don't coincide.  Categories with typically non-merged geometry
 # (wheels, body shell) use lower multipliers to preserve their shape.
 _CATEGORY_AGGRESSION: dict[str, float] = {
-    "interior":  0.0,   # documented as 0.0; interior is explicitly skipped in the operator
+    "interior":  0.3,   # very protective — interior can be reduced but carefully
     "wheel":     0.4,
     "body":      0.7,
     "glass":     0.8,
@@ -371,10 +371,6 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
                     self._set_lod_mesh(model_obj, lod_level, src_mesh.copy())
                 else:
                     category = _classify_mesh(model_obj)
-                    if category == "interior":
-                        # Interior geometry is never decimated — copy as-is
-                        self._set_lod_mesh(model_obj, lod_level, src_mesh.copy())
-                        continue
                     keep_ratio = _keep_ratio_for_mesh(base_ratio, category)
                     decimated = _decimate_mesh_bmesh(src_mesh, keep_ratio)
                     decimated.name = f"{model_obj.name}.{SOLLUMZ_UI_NAMES[lod_level].lower()}"
