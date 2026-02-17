@@ -46,11 +46,18 @@ _LIGHT_KEYWORDS = {
     "light", "lamp", "fog",
 }
 
+_INTERIOR_KEYWORDS = {
+    "interior", "dashboard", "dash", "steering", "steeringwheel",
+    "seat", "console", "dial", "gauge", "pedal", "airbag",
+    "glovebox", "handbrake", "shifter", "gear",
+}
+
 
 def _classify_mesh(obj: Object) -> str:
     """Return a classification string for *obj* based on its name.
 
     Categories:
+        ``"interior"``  – interior parts (never decimated)
         ``"underbody"`` – parts under the car (aggressive reduction)
         ``"detail"``    – small detail parts (moderate reduction)
         ``"glass"``     – windows / glass (preserve shape, reduce moderately)
@@ -60,6 +67,9 @@ def _classify_mesh(obj: Object) -> str:
     """
     name_lower = obj.name.lower()
 
+    for kw in _INTERIOR_KEYWORDS:
+        if kw in name_lower:
+            return "interior"
     for kw in _UNDERBODY_KEYWORDS:
         if kw in name_lower:
             return "underbody"
@@ -90,6 +100,7 @@ def _classify_mesh(obj: Object) -> str:
 # parts don't coincide.  Categories with typically non-merged geometry
 # (wheels, body shell) use lower multipliers to preserve their shape.
 _CATEGORY_AGGRESSION: dict[str, float] = {
+    "interior":  0.0,   # documented as 0.0; interior is explicitly skipped in the operator
     "wheel":     0.4,
     "body":      0.7,
     "glass":     0.8,
@@ -250,17 +261,20 @@ def _bmesh_edge_collapse_decimate(bm: bmesh.types.BMesh, keep_ratio: float) -> N
         if edge.calc_length() > _MAX_COLLAPSE_EDGE_LENGTH:
             continue
 
-        # Collapse: merge v2 into v1 (avoids extra Vector allocation)
+        # Collapse: merge v2 into v1's position at the midpoint
         v1, v2 = edge.verts
         midpoint = (v1.co + v2.co) / 2.0
 
         try:
-            new_vert = bmesh.utils.edge_collapse(edge, v1)
+            # vert_collapse_edge merges v2 into the edge, removing v2
+            # and the faces adjacent to the edge.
+            new_vert = bmesh.utils.vert_collapse_edge(v2, edge)
             new_vert.co = midpoint
             collapsed += 1
-        except (RuntimeError, ValueError):
-            # edge_collapse raises RuntimeError when the collapse would
-            # create degenerate geometry.  Skip and continue.
+        except (RuntimeError, ValueError, ReferenceError):
+            # vert_collapse_edge can raise RuntimeError on degenerate
+            # geometry, ValueError on invalid args, or ReferenceError
+            # if the vertex/edge was freed by a previous operation.
             continue
 
         # Re-score neighbouring edges
@@ -357,6 +371,10 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
                     self._set_lod_mesh(model_obj, lod_level, src_mesh.copy())
                 else:
                     category = _classify_mesh(model_obj)
+                    if category == "interior":
+                        # Interior geometry is never decimated — copy as-is
+                        self._set_lod_mesh(model_obj, lod_level, src_mesh.copy())
+                        continue
                     keep_ratio = _keep_ratio_for_mesh(base_ratio, category)
                     decimated = _decimate_mesh_bmesh(src_mesh, keep_ratio)
                     decimated.name = f"{model_obj.name}.{SOLLUMZ_UI_NAMES[lod_level].lower()}"
