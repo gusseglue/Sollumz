@@ -119,6 +119,10 @@ class SOLLUMZ_PT_VEHICLE_TOOLS_PANEL(FragmentToolChildPanel, bpy.types.Panel):
         layout.use_property_decorate = False
         layout.use_property_split = True
 
+        # Add automatic LOD optimization button
+        layout.operator("sollumz.auto_optimize_yft_lods", text="Automatic LOD & Optimization", icon="AUTO")
+        layout.separator()
+
         layout.operator(SOLLUMZ_OT_vehicle_preview_generated_windows.bl_idname, text="Preview Windows", icon="VIEWZOOM")
         layout.operator(SOLLUMZ_OT_GENERATE_WHEEL_INSTANCES.bl_idname,
                         text="Preview Wheel Instances", icon_value=icon("wheel"))

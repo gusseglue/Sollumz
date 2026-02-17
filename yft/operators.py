@@ -10,7 +10,7 @@ from szio.gta5 import AssetFormat, AssetVersion, AssetTarget, FragVehicleWindow
 from ..tools.meshhelper import get_combined_bound_box
 from ..shared.geometry import get_mass_properties_of_box
 from ..sollumz_helper import find_sollumz_parent
-from ..sollumz_properties import BOUND_POLYGON_TYPES, BOUND_TYPES, MaterialType, SollumType, VehicleLightID
+from ..sollumz_properties import BOUND_POLYGON_TYPES, BOUND_TYPES, MaterialType, SollumType, VehicleLightID, LODLevel
 from ..tools.blenderhelper import add_child_of_bone_constraint, create_blender_object, create_empty_object, get_child_of_bone
 from ..ybn.collision_materials import collisionmats
 from ..dependencies import IS_SZIO_NATIVE_AVAILABLE
@@ -633,3 +633,245 @@ class SOLLUMZ_OT_vehicle_preview_generated_windows(bpy.types.Operator):
 
         gpu.state.depth_test_set(old_depth_test)
         gpu.state.depth_mask_set(old_depth_mask)
+
+
+class SOLLUMZ_OT_auto_optimize_yft_lods(bpy.types.Operator):
+    """Automatically optimize vehicle YFT files by generating LOD levels with intelligent polygon reduction"""
+    bl_idname = "sollumz.auto_optimize_yft_lods"
+    bl_label = "Automatic LOD and Optimization"
+    bl_options = {"REGISTER", "UNDO"}
+
+    # LOD target polygon counts (configurable)
+    lod_high_target: bpy.props.IntProperty(
+        name="LOD High (LOD_0)",
+        description="Target polygon count for High LOD",
+        default=200000,
+        min=1000,
+        max=1000000
+    )
+    lod_medium_target: bpy.props.IntProperty(
+        name="LOD Medium (LOD_1)",
+        description="Target polygon count for Medium LOD",
+        default=100000,
+        min=500,
+        max=500000
+    )
+    lod_low_target: bpy.props.IntProperty(
+        name="LOD Low (LOD_2)",
+        description="Target polygon count for Low LOD",
+        default=50000,
+        min=250,
+        max=250000
+    )
+    lod_verylow_target: bpy.props.IntProperty(
+        name="LOD Very Low (LOD_3)",
+        description="Target polygon count for Very Low LOD",
+        default=10000,
+        min=100,
+        max=100000
+    )
+
+    preserve_uvs: bpy.props.BoolProperty(
+        name="Preserve UVs",
+        description="Preserve UV maps during decimation",
+        default=True
+    )
+
+    preserve_vertex_colors: bpy.props.BoolProperty(
+        name="Preserve Vertex Colors",
+        description="Preserve vertex colors during decimation",
+        default=True
+    )
+
+    use_symmetry: bpy.props.BoolProperty(
+        name="Use Symmetry",
+        description="Use symmetrical decimation for better results on symmetrical models",
+        default=True
+    )
+
+    batch_mode: bpy.props.BoolProperty(
+        name="Batch Mode",
+        description="Process multiple YFT files",
+        default=False
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and find_sollumz_parent(obj, SollumType.FRAGMENT) is not None
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        box = layout.box()
+        box.label(text="LOD Target Polygon Counts:", icon="MESH_DATA")
+        box.prop(self, "lod_high_target")
+        box.prop(self, "lod_medium_target")
+        box.prop(self, "lod_low_target")
+        box.prop(self, "lod_verylow_target")
+
+        box = layout.box()
+        box.label(text="Decimation Options:", icon="MODIFIER")
+        box.prop(self, "preserve_uvs")
+        box.prop(self, "preserve_vertex_colors")
+        box.prop(self, "use_symmetry")
+
+    def execute(self, context):
+        obj = context.active_object
+        frag_obj = find_sollumz_parent(obj, SollumType.FRAGMENT)
+
+        if frag_obj is None:
+            self.report({"ERROR"}, "No Fragment object found!")
+            return {"CANCELLED"}
+
+        # Find the drawable object
+        drawable_obj = None
+        for child in frag_obj.children:
+            if child.sollum_type == SollumType.DRAWABLE:
+                drawable_obj = child
+                break
+
+        if drawable_obj is None:
+            self.report({"ERROR"}, "No Drawable object found in Fragment!")
+            return {"CANCELLED"}
+
+        # Process all drawable models
+        model_objs = [child for child in drawable_obj.children 
+                      if child.sollum_type == SollumType.DRAWABLE_MODEL]
+
+        if not model_objs:
+            self.report({"ERROR"}, "No Drawable Models found!")
+            return {"CANCELLED"}
+
+        total_original_polys = 0
+        total_optimized_polys = {
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "verylow": 0
+        }
+
+        report_lines = []
+        report_lines.append(f"=== YFT LOD Optimization Report ===")
+        report_lines.append(f"Fragment: {frag_obj.name}")
+        report_lines.append(f"Models processed: {len(model_objs)}")
+        report_lines.append("")
+
+        for model_obj in model_objs:
+            result = self.optimize_model_lods(context, model_obj, report_lines)
+            if result:
+                total_original_polys += result["original"]
+                for lod_name in ["high", "medium", "low", "verylow"]:
+                    total_optimized_polys[lod_name] += result[lod_name]
+
+        report_lines.append("")
+        report_lines.append("=== Summary ===")
+        report_lines.append(f"Original total polygons: {total_original_polys:,}")
+        report_lines.append(f"LOD High total: {total_optimized_polys['high']:,}")
+        report_lines.append(f"LOD Medium total: {total_optimized_polys['medium']:,}")
+        report_lines.append(f"LOD Low total: {total_optimized_polys['low']:,}")
+        report_lines.append(f"LOD Very Low total: {total_optimized_polys['verylow']:,}")
+
+        # Print report to console
+        for line in report_lines:
+            print(line)
+
+        self.report({"INFO"}, f"LOD optimization complete! Processed {len(model_objs)} models.")
+
+        return {"FINISHED"}
+
+    def optimize_model_lods(self, context, model_obj, report_lines):
+        """Optimize a single drawable model by generating LOD levels"""
+        if model_obj.type != "MESH":
+            return None
+
+        lods = model_obj.sz_lods
+
+        # Get the highest existing LOD as source
+        source_lod = None
+        source_mesh = None
+        for lod_level in [LODLevel.VERYHIGH, LODLevel.HIGH, LODLevel.MEDIUM, LODLevel.LOW]:
+            lod = lods.get_lod(lod_level)
+            if lod.mesh is not None:
+                source_lod = lod_level
+                source_mesh = lod.mesh
+                break
+
+        if source_mesh is None:
+            report_lines.append(f"  {model_obj.name}: Skipped (no source mesh)")
+            return None
+
+        # Count original polygons
+        original_poly_count = len(source_mesh.polygons)
+        report_lines.append(f"  {model_obj.name}:")
+        report_lines.append(f"    Original: {original_poly_count:,} polygons")
+
+        result = {
+            "original": original_poly_count,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "verylow": 0
+        }
+
+        # Define LOD levels to generate
+        lod_targets = [
+            (LODLevel.HIGH, self.lod_high_target, "high"),
+            (LODLevel.MEDIUM, self.lod_medium_target, "medium"),
+            (LODLevel.LOW, self.lod_low_target, "low"),
+            (LODLevel.VERYLOW, self.lod_verylow_target, "verylow"),
+        ]
+
+        previous_mode = model_obj.mode
+        previous_lod_level = lods.active_lod_level
+
+        for lod_level, target_count, lod_name in lod_targets:
+            # Calculate decimation ratio
+            ratio = min(1.0, target_count / original_poly_count) if original_poly_count > 0 else 1.0
+
+            # Create a copy of the source mesh
+            new_mesh = source_mesh.copy()
+            new_mesh.name = f"{model_obj.name}.{lod_name}"
+
+            # Set the mesh for this LOD
+            lods.get_lod(lod_level).mesh = new_mesh
+
+            # Switch to this LOD to edit it
+            bpy.ops.object.mode_set(mode="OBJECT")
+            lods.active_lod_level = lod_level
+
+            # Apply decimation
+            if ratio < 1.0:
+                bpy.ops.object.mode_set(mode="EDIT")
+                bpy.ops.mesh.select_all(action="SELECT")
+
+                # Use decimate modifier approach
+                bpy.ops.object.mode_set(mode="OBJECT")
+
+                # Add decimate modifier
+                decimate_mod = model_obj.modifiers.new(name="TempDecimate", type="DECIMATE")
+                decimate_mod.ratio = ratio
+                decimate_mod.use_collapse_triangulate = True
+
+                if self.use_symmetry:
+                    decimate_mod.use_symmetry = True
+
+                # Apply the modifier
+                bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
+
+            final_poly_count = len(new_mesh.polygons)
+            result[lod_name] = final_poly_count
+            reduction_pct = ((original_poly_count - final_poly_count) / original_poly_count * 100) if original_poly_count > 0 else 0
+            report_lines.append(f"    {lod_name.upper()}: {final_poly_count:,} polygons ({reduction_pct:.1f}% reduction)")
+
+        # Restore previous state
+        bpy.ops.object.mode_set(mode="OBJECT")
+        lods.active_lod_level = previous_lod_level
+        bpy.ops.object.mode_set(mode=previous_mode)
+
+        return result
