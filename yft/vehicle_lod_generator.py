@@ -1,15 +1,13 @@
 """Vehicle LOD Generator for Sollumz.
 
 Automatically generates multiple LOD levels for vehicle fragments (YFT) with
-intelligent, component-aware decimation.  Uses a custom bmesh-based edge-collapse
-algorithm instead of Blender's built-in Decimate modifier for better control over
-non-merged / disconnected geometry common in vehicle models.
+intelligent, component-aware decimation.  Uses Blender's Decimate modifier
+applied to temporary objects to reliably reduce polygon count while preserving
+the LOD system's mesh management.
 """
-import bmesh
 import bpy
 from bpy.types import Context, Mesh, Object, Operator, Panel, PropertyGroup
 from bpy.props import IntProperty
-import heapq
 
 from ..lods import LODLevels
 from ..sollumz_properties import LODLevel, SollumType, SOLLUMZ_UI_NAMES
@@ -100,7 +98,7 @@ def _classify_mesh(obj: Object) -> str:
 # parts don't coincide.  Categories with typically non-merged geometry
 # (wheels, body shell) use lower multipliers to preserve their shape.
 _CATEGORY_AGGRESSION: dict[str, float] = {
-    "interior":  0.3,   # very protective — interior can be reduced but carefully
+    "interior":  0.3,
     "wheel":     0.4,
     "body":      0.7,
     "glass":     0.8,
@@ -182,125 +180,42 @@ def _find_original_mesh(model_obj: Object) -> Mesh | None:
 
 
 # ---------------------------------------------------------------------------
-#  Custom bmesh edge-collapse decimation
+#  Decimation via Blender's Decimate modifier on a temporary object
 # ---------------------------------------------------------------------------
 
-# Large penalty added to boundary/non-manifold edge costs to ensure they are
-# collapsed last, preserving mesh island outlines and UV seams.
-_EDGE_PROTECT_PENALTY = 1e6
+def _decimate_mesh(src_mesh: Mesh, keep_ratio: float) -> Mesh:
+    """Create a decimated copy of *src_mesh* using Blender's Decimate modifier.
 
-# Maximum edge length (in Blender units) that will be considered for collapse.
-# Edges longer than this threshold are skipped to avoid collapsing across gaps
-# in non-merged geometry.  Vehicle models typically use a scale where 1 unit ≈
-# 1 metre, so 0.5 represents ~50 cm — well above typical edge lengths in
-# detailed geometry but below the gaps between disconnected parts.
-_MAX_COLLAPSE_EDGE_LENGTH = 0.5
-
-
-def _edge_collapse_cost(edge: bmesh.types.BMEdge) -> float:
-    """Score an edge for collapse priority (lower = collapse first).
-
-    Uses edge length as the primary metric — shorter edges are collapsed
-    first because they contribute least to the overall silhouette.
-    Boundary edges (edges with only one face) get a large penalty so they
-    are preserved longer, protecting mesh island outlines and UV seams.
-    """
-    length = edge.calc_length()
-
-    if edge.is_boundary:
-        length += _EDGE_PROTECT_PENALTY
-
-    if not edge.is_manifold and not edge.is_boundary:
-        length += _EDGE_PROTECT_PENALTY
-
-    return length
-
-
-def _bmesh_edge_collapse_decimate(bm: bmesh.types.BMesh, keep_ratio: float) -> None:
-    """Decimate a bmesh by collapsing shortest edges first.
-
-    Operates in-place on *bm*.  Preserves boundary edges and non-manifold
-    geometry to protect disconnected mesh islands (non-merged vertices).
-
-    Args:
-        bm: The bmesh to decimate.
-        keep_ratio: Fraction of faces to keep (0.0–1.0).
-    """
-    target_faces = max(4, int(len(bm.faces) * keep_ratio))
-
-    if len(bm.faces) <= target_faces:
-        return
-
-    # Build a min-heap of (cost, edge_index) pairs
-    bm.edges.ensure_lookup_table()
-    heap: list[tuple[float, int]] = []
-    for edge in bm.edges:
-        cost = _edge_collapse_cost(edge)
-        heapq.heappush(heap, (cost, edge.index))
-
-    collapsed = 0
-    max_collapses = len(bm.faces) - target_faces
-
-    while heap and collapsed < max_collapses and len(bm.faces) > target_faces:
-        cost, edge_idx = heapq.heappop(heap)
-
-        # Edge may have been removed by a previous collapse
-        bm.edges.ensure_lookup_table()
-        if edge_idx >= len(bm.edges):
-            continue
-        edge = bm.edges[edge_idx]
-        if not edge.is_valid:
-            continue
-
-        # Skip boundary and non-manifold edges
-        if edge.is_boundary or (not edge.is_manifold):
-            continue
-
-        # Skip edges longer than the threshold to avoid collapsing across
-        # gaps in non-merged geometry
-        if edge.calc_length() > _MAX_COLLAPSE_EDGE_LENGTH:
-            continue
-
-        # Collapse: merge v2 into v1's position at the midpoint
-        v1, v2 = edge.verts
-        midpoint = (v1.co + v2.co) / 2.0
-
-        try:
-            # vert_collapse_edge merges v2 into the edge, removing v2
-            # and the faces adjacent to the edge.
-            new_vert = bmesh.utils.vert_collapse_edge(v2, edge)
-            new_vert.co = midpoint
-            collapsed += 1
-        except (RuntimeError, ValueError, ReferenceError):
-            # vert_collapse_edge can raise RuntimeError on degenerate
-            # geometry, ValueError on invalid args, or ReferenceError
-            # if the vertex/edge was freed by a previous operation.
-            continue
-
-        # Re-score neighbouring edges
-        for neighbour_edge in new_vert.link_edges:
-            if neighbour_edge.is_valid:
-                new_cost = _edge_collapse_cost(neighbour_edge)
-                heapq.heappush(heap, (new_cost, neighbour_edge.index))
-
-
-def _decimate_mesh_bmesh(src_mesh: Mesh, keep_ratio: float) -> Mesh:
-    """Create a decimated copy of *src_mesh* using custom bmesh edge-collapse.
+    A temporary helper object is created, the Decimate modifier is applied to
+    it, and the resulting mesh is extracted.  The temporary object is deleted
+    afterwards.  This avoids interfering with the LOD system's mesh switching
+    on the real drawable model objects.
 
     Returns a new Mesh data-block.  The original is not modified.
     """
     new_mesh = src_mesh.copy()
 
-    bm = bmesh.new()
-    bm.from_mesh(new_mesh)
+    # Create a temporary object to host the modifier
+    temp_obj = bpy.data.objects.new("_sz_lod_tmp", new_mesh)
+    bpy.context.collection.objects.link(temp_obj)
 
-    _bmesh_edge_collapse_decimate(bm, keep_ratio)
+    try:
+        # Add and configure the Decimate modifier
+        mod = temp_obj.modifiers.new(name="_decimate", type="DECIMATE")
+        mod.decimate_type = "COLLAPSE"
+        mod.ratio = keep_ratio
 
-    bm.to_mesh(new_mesh)
-    bm.free()
+        # Apply the modifier — must be active and selected
+        bpy.context.view_layer.objects.active = temp_obj
+        temp_obj.select_set(True)
+        bpy.ops.object.modifier_apply(modifier=mod.name)
 
-    new_mesh.update()
-    return new_mesh
+        result_mesh = temp_obj.data
+    finally:
+        # Always clean up the temporary object
+        bpy.data.objects.remove(temp_obj, do_unlink=True)
+
+    return result_mesh
 
 
 # ---------------------------------------------------------------------------
@@ -358,25 +273,32 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
 
         generated_count = 0
 
-        for lod_level, target in lod_levels:
-            base_ratio = _compute_base_ratio_for_lod(original_total, target)
+        # Save and restore active object after all LOD generation
+        prev_active = context.view_layer.objects.active
 
-            for model_obj in models:
-                src_mesh = original_meshes.get(model_obj.name)
-                if src_mesh is None:
-                    continue
+        try:
+            for lod_level, target in lod_levels:
+                base_ratio = _compute_base_ratio_for_lod(original_total, target)
 
-                if base_ratio <= 0.0:
-                    # Target is above current poly count — copy original as-is
-                    self._set_lod_mesh(model_obj, lod_level, src_mesh.copy())
-                else:
-                    category = _classify_mesh(model_obj)
-                    keep_ratio = _keep_ratio_for_mesh(base_ratio, category)
-                    decimated = _decimate_mesh_bmesh(src_mesh, keep_ratio)
-                    decimated.name = f"{model_obj.name}.{SOLLUMZ_UI_NAMES[lod_level].lower()}"
-                    self._set_lod_mesh(model_obj, lod_level, decimated)
+                for model_obj in models:
+                    src_mesh = original_meshes.get(model_obj.name)
+                    if src_mesh is None:
+                        continue
 
-            generated_count += 1
+                    if base_ratio <= 0.0:
+                        # Target is above current poly count — copy original as-is
+                        self._set_lod_mesh(model_obj, lod_level, src_mesh.copy())
+                    else:
+                        category = _classify_mesh(model_obj)
+                        keep_ratio = _keep_ratio_for_mesh(base_ratio, category)
+                        decimated = _decimate_mesh(src_mesh, keep_ratio)
+                        decimated.name = f"{model_obj.name}.{SOLLUMZ_UI_NAMES[lod_level].lower()}"
+                        self._set_lod_mesh(model_obj, lod_level, decimated)
+
+                generated_count += 1
+        finally:
+            # Restore active object
+            context.view_layer.objects.active = prev_active
 
         # Build report
         total_after: dict[str, int] = {}
