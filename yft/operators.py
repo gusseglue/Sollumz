@@ -860,9 +860,15 @@ class SOLLUMZ_OT_auto_optimize_yft_lods(bpy.types.Operator):
                 if self.use_symmetry:
                     decimate_mod.use_symmetry = True
 
-                # Apply the modifier
-                with context.temp_override(object=model_obj):
-                    bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
+                # Apply the modifier with error handling
+                try:
+                    with context.temp_override(object=model_obj):
+                        bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
+                except Exception as e:
+                    # Clean up modifier if application fails
+                    if decimate_mod.name in model_obj.modifiers:
+                        model_obj.modifiers.remove(decimate_mod)
+                    raise e
 
             final_poly_count = len(new_mesh.polygons)
             result[lod_name] = final_poly_count

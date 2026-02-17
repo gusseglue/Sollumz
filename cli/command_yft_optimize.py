@@ -52,22 +52,19 @@ def main(argv: list[str]) -> int:
         help="Target polygon count for LOD Very Low (default: 10000)",
     )
     parser.add_argument(
-        "--preserve-uvs",
+        "--no-preserve-uvs",
         action="store_true",
-        default=True,
-        help="Preserve UV maps during decimation (default: True)",
+        help="Do not preserve UV maps during decimation (default: preserve UVs)",
     )
     parser.add_argument(
-        "--preserve-vertex-colors",
+        "--no-preserve-vertex-colors",
         action="store_true",
-        default=True,
-        help="Preserve vertex colors during decimation (default: True)",
+        help="Do not preserve vertex colors during decimation (default: preserve vertex colors)",
     )
     parser.add_argument(
-        "--use-symmetry",
+        "--no-symmetry",
         action="store_true",
-        default=True,
-        help="Use symmetrical decimation (default: True)",
+        help="Do not use symmetrical decimation (default: use symmetry)",
     )
     parser.add_argument(
         "--report",
@@ -111,9 +108,10 @@ def main(argv: list[str]) -> int:
             )
 
             # Find the fragment object
+            from ..sollumz_properties import SollumType
             frag_obj = None
             for obj in bpy.data.objects:
-                if obj.sollum_type == "sollumz_fragment":
+                if obj.sollum_type == SollumType.FRAGMENT:
                     frag_obj = obj
                     break
 
@@ -134,9 +132,9 @@ def main(argv: list[str]) -> int:
                 args.lod_medium,
                 args.lod_low,
                 args.lod_verylow,
-                args.preserve_uvs,
-                args.preserve_vertex_colors,
-                args.use_symmetry,
+                not args.no_preserve_uvs,
+                not args.no_preserve_vertex_colors,
+                not args.no_symmetry,
                 report_lines
             )
 
@@ -332,8 +330,16 @@ def optimize_model_lods(model_obj, lod_high, lod_medium, lod_low, lod_verylow,
             if use_symmetry:
                 decimate_mod.use_symmetry = True
 
-            # Apply the modifier
-            bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
+            # Apply the modifier with error handling
+            try:
+                # Make sure object is active for modifier application
+                bpy.context.view_layer.objects.active = model_obj
+                bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
+            except Exception as e:
+                # Clean up modifier if application fails
+                if decimate_mod.name in model_obj.modifiers:
+                    model_obj.modifiers.remove(decimate_mod)
+                raise e
 
         final_poly_count = len(new_mesh.polygons)
         result[lod_name] = final_poly_count
