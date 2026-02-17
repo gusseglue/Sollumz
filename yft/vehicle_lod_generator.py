@@ -77,16 +77,22 @@ def _classify_mesh(obj: Object) -> str:
 
 
 # Per-category decimation ratio *multipliers* applied on top of the base ratio
-# for each LOD level.  A higher multiplier means *more* geometry is removed.
-# The value is multiplied with the base decimation ratio to get the final ratio
-# passed to the decimate modifier (``ratio = 1.0 - base * multiplier``).
+# for each LOD level.  The value is multiplied with the base decimation ratio
+# to get the final fraction of geometry to remove.  Lower values mean the
+# category is more *protective* (less geometry removed); higher values mean
+# more aggressive reduction.
+#
+# Vehicle meshes are often *not* merged — vertices at shared edges between parts
+# don't coincide.  Aggressive decimation on such geometry can collapse edges
+# across gaps and create holes.  Categories with typically non-merged geometry
+# (wheels, body shell) use lower multipliers to preserve their shape.
 _CATEGORY_AGGRESSION: dict[str, float] = {
-    "body":      1.0,
-    "glass":     1.0,
-    "wheel":     1.0,
-    "light":     1.1,
-    "detail":    1.3,
-    "underbody": 1.5,
+    "wheel":     0.4,   # very protective — wheels have many disconnected parts
+    "body":      0.7,   # protective — body shells often have non-merged vertices
+    "glass":     0.8,   # moderate — flat panels but visible
+    "light":     0.9,   # slightly protective
+    "detail":    1.3,   # moderate reduction
+    "underbody": 1.5,   # aggressive — rarely visible
 }
 
 # Maximum fraction of geometry to remove in a single decimation pass.
@@ -94,8 +100,9 @@ _CATEGORY_AGGRESSION: dict[str, float] = {
 _MAX_DECIMATION_RATIO = 0.99
 
 # Minimum fraction of geometry to keep after decimation, ensuring the mesh
-# is never fully collapsed.
-_MIN_KEEP_RATIO = 0.01
+# is never fully collapsed.  Set conservatively to avoid destroying non-merged
+# geometry (disconnected islands can vanish at very low keep ratios).
+_MIN_KEEP_RATIO = 0.05
 
 # Default target polygon counts per LOD level (informational, used to compute
 # an appropriate decimation ratio when the user enables adaptive mode).
@@ -264,7 +271,13 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
         lod_level: LODLevel,
         base_ratio: float,
     ) -> None:
-        """Generate a single LOD mesh for *model_obj* via decimation."""
+        """Generate a single LOD mesh for *model_obj* via Decimate modifier.
+
+        Uses the Decimate modifier (COLLAPSE mode) instead of the edit-mode
+        decimate operator because it handles non-merged geometry (disconnected
+        mesh islands / unwelded vertices) much better — it respects island
+        boundaries and avoids collapsing edges across gaps.
+        """
         lods: LODLevels = model_obj.sz_lods
         lod = lods.get_lod(lod_level)
 
@@ -281,7 +294,7 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
         new_mesh = src_mesh.copy()
         new_mesh.name = f"{model_obj.name}.{SOLLUMZ_UI_NAMES[lod_level].lower()}"
 
-        # Store the mesh in the LOD slot and switch to it to apply decimation
+        # Store the mesh in the LOD slot and switch to it
         lod.mesh = new_mesh
 
         prev_lod_level = lods.active_lod_level
@@ -292,10 +305,15 @@ class SOLLUMZ_OT_vehicle_generate_lods(Operator):
             bpy.ops.object.mode_set(mode="OBJECT")
         lods.active_lod_level = lod_level
 
-        bpy.ops.object.mode_set(mode="EDIT")
-        bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.mesh.decimate(ratio=keep_ratio)
-        bpy.ops.object.mode_set(mode="OBJECT")
+        # Apply a Decimate modifier (COLLAPSE mode).
+        # The modifier respects disconnected mesh islands and avoids
+        # collapsing edges between non-merged vertices, which is critical
+        # for vehicle models where parts (wheels, body panels) are often
+        # separate, unwelded geometry within the same mesh object.
+        mod = model_obj.modifiers.new(name="_sz_lod_decimate", type="DECIMATE")
+        mod.decimate_type = "COLLAPSE"
+        mod.ratio = keep_ratio
+        bpy.ops.object.modifier_apply(modifier=mod.name)
 
         lods.active_lod_level = prev_lod_level
         context.view_layer.objects.active = prev_active
