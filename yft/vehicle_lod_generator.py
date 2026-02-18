@@ -186,33 +186,46 @@ def _find_original_mesh(model_obj: Object) -> Mesh | None:
 def _decimate_mesh(src_mesh: Mesh, keep_ratio: float) -> Mesh:
     """Create a decimated copy of *src_mesh* using Blender's Decimate modifier.
 
-    Only the Decimate modifier (COLLAPSE mode) is applied.  No vertex welding
-    or normal recalculation is performed because vehicle meshes rely on split
-    normals (separate vertices at the same position) to define hard/sharp
-    edges.  Welding those vertices or overriding the normals makes the model
-    look soft and round and causes shadow artefacts in GTA V.
+    After decimation, a Data Transfer modifier copies the custom split normals
+    from the original mesh back onto the decimated mesh.  This preserves the
+    hard/sharp edges and correct shading that GTA V expects — without this
+    step the Decimate modifier recalculates normals automatically, making the
+    model look soft/round and causing shadow artefacts in-game.
 
     Returns a new Mesh data-block.  The original is not modified.
     """
     new_mesh = src_mesh.copy()
 
-    # Create a temporary object to host the modifier
+    # Create a temporary object for decimation
     temp_obj = bpy.data.objects.new("_sz_lod_tmp", new_mesh)
     bpy.context.collection.objects.link(temp_obj)
+
+    # Create a source object holding the original mesh for normal transfer
+    src_obj = bpy.data.objects.new("_sz_lod_src", src_mesh)
+    bpy.context.collection.objects.link(src_obj)
 
     try:
         bpy.context.view_layer.objects.active = temp_obj
         temp_obj.select_set(True)
 
-        # Decimate — the only modifier we apply.
+        # --- 1. Decimate -------------------------------------------------
         mod_dec = temp_obj.modifiers.new(name="_decimate", type="DECIMATE")
         mod_dec.decimate_type = "COLLAPSE"
         mod_dec.ratio = keep_ratio
         bpy.ops.object.modifier_apply(modifier=mod_dec.name)
 
+        # --- 2. Transfer normals from original mesh ----------------------
+        mod_dt = temp_obj.modifiers.new(name="_data_transfer", type="DATA_TRANSFER")
+        mod_dt.object = src_obj
+        mod_dt.use_loop_data = True
+        mod_dt.data_types_loops = {"CUSTOM_NORMAL"}
+        mod_dt.loop_mapping = "POLYINTERP_LNORPROJ"
+        bpy.ops.object.modifier_apply(modifier=mod_dt.name)
+
         result_mesh = temp_obj.data
     finally:
         bpy.data.objects.remove(temp_obj, do_unlink=True)
+        bpy.data.objects.remove(src_obj, do_unlink=True)
 
     return result_mesh
 
