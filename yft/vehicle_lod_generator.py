@@ -186,21 +186,17 @@ def _find_original_mesh(model_obj: Object) -> Mesh | None:
 def _decimate_mesh(src_mesh: Mesh, keep_ratio: float) -> Mesh:
     """Create a decimated copy of *src_mesh* using Blender's Decimate modifier.
 
-    Steps:
-        1. Copy the source mesh and attach it to a temporary object.
-        2. Merge vertices by distance so the Decimate modifier can work on
-           properly connected geometry (vehicle meshes often have duplicated
-           vertices at part boundaries).
-        3. Apply a Decimate modifier (COLLAPSE mode) with the given ratio.
-        4. Apply a Weighted Normal modifier to restore smooth shading on the
-           reduced mesh.
-        5. Extract the resulting mesh and delete the temporary object.
+    Only the Decimate modifier (COLLAPSE mode) is applied.  No vertex welding
+    or normal recalculation is performed because vehicle meshes rely on split
+    normals (separate vertices at the same position) to define hard/sharp
+    edges.  Welding those vertices or overriding the normals makes the model
+    look soft and round and causes shadow artefacts in GTA V.
 
     Returns a new Mesh data-block.  The original is not modified.
     """
     new_mesh = src_mesh.copy()
 
-    # Create a temporary object to host modifiers
+    # Create a temporary object to host the modifier
     temp_obj = bpy.data.objects.new("_sz_lod_tmp", new_mesh)
     bpy.context.collection.objects.link(temp_obj)
 
@@ -208,22 +204,11 @@ def _decimate_mesh(src_mesh: Mesh, keep_ratio: float) -> Mesh:
         bpy.context.view_layer.objects.active = temp_obj
         temp_obj.select_set(True)
 
-        # --- 1. Merge by distance (weld duplicated verts) ----------------
-        mod_weld = temp_obj.modifiers.new(name="_weld", type="WELD")
-        mod_weld.merge_threshold = 0.0001
-        bpy.ops.object.modifier_apply(modifier=mod_weld.name)
-
-        # --- 2. Decimate -------------------------------------------------
+        # Decimate — the only modifier we apply.
         mod_dec = temp_obj.modifiers.new(name="_decimate", type="DECIMATE")
         mod_dec.decimate_type = "COLLAPSE"
         mod_dec.ratio = keep_ratio
         bpy.ops.object.modifier_apply(modifier=mod_dec.name)
-
-        # --- 3. Weighted Normal ------------------------------------------
-        mod_wn = temp_obj.modifiers.new(name="_weighted_normal", type="WEIGHTED_NORMAL")
-        mod_wn.mode = "FACE_AREA"
-        mod_wn.keep_sharp = True
-        bpy.ops.object.modifier_apply(modifier=mod_wn.name)
 
         result_mesh = temp_obj.data
     finally:
